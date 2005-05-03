@@ -1,0 +1,12 @@
+Abrechnungsbogen;;;
+
+Name:;%%NAME%%;;;
+
+Woche (KW):;%%WEEK%%;;;(%%FROMDATE%% - %%TODATE%%)
+
+
+Projekt;Dauer;Entgelt;Summe;Anmerkungen
+;[Stunden];[EUR/h];[EUR];
+%%PROJECTNAME%%;%%HOURS%%;%%RATE%%;%%PROJECTSUM%%;%%ANNOTATIONS%%
+;;;
+Gesamt:;%%SUMHOURS%%;;%%SUM%%

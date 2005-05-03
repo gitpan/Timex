@@ -1,0 +1,161 @@
+#!/usr/local/bin/perl
+# -*- perl -*-
+
+#
+# $Id: ctimex,v 1.5 1999/03/09 14:04:18 eserte Exp $
+# Author: Slaven Rezic
+# Mail: <URL:mailto:eserte@cs.tu-berlin.de>
+# WWW:  <URL:http://www.cs.tu-berlin.de/~eserte/>
+# Talk: <URL:telnet://ole.cs.tu-berlin.de:1211>
+#
+
+use FindBin;
+use lib "$FindBin::RealBin";
+use Term::Complete;
+use Timex::Project;
+use Getopt::Long;
+
+$loadfile = "/home/e/eserte/private/log/mytimex.pj1";
+$savefile = "/home/e/eserte/private/log/mytimex-timex.pj1";
+
+$daily = 0;
+$debug = 0;
+
+GetOptions('f=s' => sub { my($n,$val) = @_;
+			  set_file($val);
+		      },
+	   'daily!' => \$daily,
+	   'debug!' => \$debug,
+	  );
+
+if (@ARGV) {
+    set_file(shift @ARGV);
+}
+if (@ARGV) {
+    die "usage!";
+}
+
+$| = 1;
+
+my $root = new Timex::Project;
+$root->load($loadfile);
+
+@list_of_projects = get_subprojects($root);
+
+&output_projects;
+
+while (1) {
+    $input = Complete("project: ", map { $_->[0] } @list_of_projects);
+    
+    if ($input eq '') {
+	print STDERR "Datei ($savefile) sichern? (j/n) ";
+	$_ = <STDIN>;
+	chomp;
+	if ($_ =~ /^j$/i) {
+	    my $res = $root->save($savefile);
+	    if ($res) {
+		print STDERR "Datei erfolgreich gesichert!\n";
+		exit 0;
+	    }
+	} elsif ($_ =~ /^n$/i) {
+	    exit 0;
+	} else {
+	    &output_projects;
+	}
+	next;
+    } elsif ($input eq '?') {
+	output_projects();
+	next;
+    } elsif ($input eq '!!') {
+	if (defined $last_project_label) {
+	    $input = $last_project_label;
+	} else {
+	    warn "Leere History!\n";
+	    next;
+	}
+    }	
+
+    if (!exists $project_label{$input}) {
+	warn "$input existiert nicht!\n";
+	next;
+    }
+
+    $project = $project_label{$input};
+    $last_project_label = $input;
+
+    $timeout = 1;
+
+    $project->start_time;
+    while (1) {
+	print STDERR $project->pathname, ": ";
+	$t = $project->sum_time(0);
+	printf STDERR ("Zeit: %02d:%02d:%02d\r",
+		       $t/3600, ($t%3600)/60, (($t%3600)%60));
+
+	$rin = $win = $ein = '';
+	vec($rin,fileno(STDIN),1) = 1;
+	$ein = $rin | $win;
+	($gotit, $newtimeout) = select($rin, $win, $ein, $timeout);
+	if ($gotit) {
+	    $project->end_time;
+	    print STDERR "\n";
+	    last;
+	}
+    }
+
+}
+
+sub output_projects {
+    print STDERR "\nList of projects:\n-----------------\n";
+    my $p;
+    foreach $p (@list_of_projects) {
+	print STDERR (">" x $p->[1]->level), $p->[0], "\n";
+	if ($debug) {
+	    if ($daily) {
+		@times = $p->[1]->daily_times;
+	    } else {
+		@times = @{$p->[1]->{'times'}};
+	    }
+	    foreach $t (@times) {
+		print STDERR
+		  scalar localtime $t->[0], " - ",
+		  scalar localtime $t->[1];
+		printf STDERR " %d:%02d h", $t->[2]/3600, ($t->[2]%3600)/60
+		  if $daily;
+		print STDERR "\n";
+	    }
+	}
+    }
+    print STDERR "\n";
+}
+
+sub get_subprojects {
+    my $p = shift;
+    my @res;
+    my @sub_projects;
+    my $pp;
+    foreach $pp (reverse $p->sorted_subprojects('latest')) {
+	push_warn(\@res, $pp);
+	@sub_projects = &get_subprojects($pp);
+	if (@sub_projects != ()) {
+	    push(@res, @sub_projects);
+	}
+    }
+    @res;
+}
+
+sub push_warn {
+    my($arrref, $obj) = @_;
+    my $label = $obj->pathname;
+    if (exists $labels{$label}) {
+	warn "$label " . ($labels{$label}+1) . "x defined!";
+    }
+    push(@$arrref, [$label, $obj]);
+    $labels{$label}++;
+    $project_label{$label} = $obj;
+}
+
+sub set_file {
+    my $file = shift;
+    $loadfile = $savefile = $file;
+}

@@ -1,0 +1,344 @@
+#!/usr/local/bin/perl -w
+# -*- perl -*-
+
+#
+# $Id: timexserver,v 1.5 2000/08/01 18:43:04 eserte Exp $
+# Author: Slaven Rezic
+#
+# Copyright (C) 1999 Slaven Rezic. All rights reserved.
+# This program is free software; you can redistribute it and/or
+# modify it under the same terms as Perl itself.
+#
+# Mail: eserte@cs.tu-berlin.de
+# WWW:  http://user.cs.tu-berlin.de/~eserte/
+#
+
+# XXX -T fehlt
+
+
+use Getopt::Long;
+use Event;
+
+use FindBin;
+use lib ("$FindBin::RealBin");
+use Timex::Project;
+use Timex::Server;
+#use Storable qw(nstore freeze);
+
+use strict;
+use vars qw($top $thisprog $homedir $assign_file $pw_file
+	    %current_project %user_project);
+
+$homedir     = _untaint((getpwuid($>))[7]);
+$thisprog    = _untaint($0);
+$assign_file = "$homedir/.timex_assignment";
+$pw_file     = "$homedir/.timex_pw";
+
+my @nowtime = localtime;
+my $today_time = time - $nowtime[0] - $nowtime[1]*60 - $nowtime[2]*60*60;
+
+my $first_user_id = 100;
+
+my(%user_assign, %user_pw);
+
+if ($> != 0) {
+    die "The effective user id is not root.\n".
+	"Is the mode of $thisprog correctly set to setuid?\n";
+}
+
+my $use_gui      = 0;
+my $start_server = 0;
+
+GetOptions("gui!" => \$use_gui,
+	   "start!" => \$start_server,
+	  );
+
+if ($use_gui) {
+    gui();
+} else {
+    start_server();
+}
+
+sub gui {
+    require Tk;
+    require Tk::Dialog;
+    require Tk::HList;
+
+    $top = MainWindow->new;
+
+    my $cb;
+    my $want_start_server;
+    $cb = $top->Checkbutton(-text => "Start/Stop server",
+			    -variable => \$want_start_server,
+			    -command => sub {
+				if ($want_start_server) {
+				    start_server();
+				} else {
+				    end_server();
+				}
+			    })->pack(-side => "bottom");
+
+    my $hl = $top->Scrolled('HList',
+			    -scrollbars => "osoe",
+			    -header => 1,
+			    -columns => 3,
+			    -width => 40,
+			    )->pack(-expand => 1, -fill => "both");
+
+    $hl->header('create', 0, -text => 'User:');
+    $hl->header('create', 1, -text => 'Project file:');
+    $hl->header('create', 2, -text => 'Current project:');
+
+    fetch_all_users();
+    load_assign();
+    fill_assign($hl);
+    load_pw();
+
+    $top->protocol('WM_DELETE_WINDOW' => \&exit_app);
+
+    if ($start_server) {
+	$cb->invoke;
+    }
+
+    Tk::MainLoop();
+
+}
+
+sub fill_assign {
+    my $hl = shift;
+    my $i = 0;
+    foreach my $user (sort keys %user_assign) {
+	$hl->add($i, -text => $user);
+	my $user2 = $user;
+	my $b;
+	$b = $hl->Button(-text => $user_assign{$user},
+			 -command => sub {
+			     # XXX ist nicht taint-sicher
+			     my $f = $top->getOpenFile;
+			     if (defined $f) {
+				 $user_assign{$user2} = $f;
+				 $b->configure(-text => $f);
+			     }
+			 });
+	$hl->itemCreate($i, 1, -itemtype => "window", -window => $b);
+	my $l;
+	$l = $hl->Label(-textvariable => \$current_project{$user});
+	$hl->itemCreate($i, 2, -itemtype => "window", -window => $l);
+	$i++;
+    }
+}
+
+sub load_assign {
+    if (open(A, $assign_file)) {
+	while(<A>) {
+	    chomp;
+	    my($k,$v) = split /\t/;
+	    $user_assign{$k} = $v;
+	}
+	close A;
+    }
+}
+
+sub load_pw {
+    if (open(A, $pw_file)) {
+	while(<A>) {
+	    chomp;
+	    my($k,$v) = split /\t/;
+	    $user_pw{$k} = $v;
+	}
+	close A;
+    }
+}
+
+sub fetch_all_users {
+    setpwent();
+    my(@data);
+    while(@data = getpwent()) {
+	$user_assign{$data[0]} = '' if ($data[2] >= $first_user_id and
+					$data[0] ne 'nobody' and
+				        -d $data[7]);
+    }
+    endpwent();
+}
+
+sub save_assign {
+    if (open(A, ">$assign_file")) {
+	while(my($k,$v) = each %user_assign) {
+	    print A "$k\t$v\n";
+	}
+	close A;
+    }
+}
+
+sub _untaint {
+    my $s = shift;
+    $s =~ /^(.*)$/;
+    $1;
+}
+
+sub exit_app {
+    end_server();
+    save_projects();
+    save_assign();
+    $top->destroy;
+}
+
+sub save_projects {
+    foreach (keys %user_project) {
+	if (defined $user_project{$_}) {
+	    $user_project{$_}->save($user_assign{$_});
+	}
+    }
+}
+
+sub start_server {
+    if (defined $top and Tk::Exists($top)) {
+	$top->update;
+    }
+
+    for my $user (keys %user_assign) {
+	my $file = $user_assign{$user};
+	if ($file ne '' && -r $file) {
+	    $user_project{$user} = new Timex::Project;
+	    if (!$user_project{$user}->load($file)) {
+		warn "Can't load project file $file for user $user";
+	    }
+	}
+    }
+
+    my $api = 
+      [{ name => 'start', req => "a*",
+	 code => sub {
+	     my $o = shift;
+	     my(%args) = split("\0", shift);
+	     if (!auth_user($o, %args)) {
+		 $o->rpc('ok', 'AUTH failed');
+	     } else {
+		 my $pn = $args{-args};
+		 my $root = $user_project{$args{-user}};
+		 my $p = $root->find_by_pathname($pn);
+		 if (!$p) {
+		     $o->rpc('ok', "Can't find pathname $pn");
+		 } else {
+		     if (defined $p->current) {
+			 # already a project running
+			 $p->current->end_time;
+		     }
+		     $p->start_time;
+		     $p->set_current;
+		     $current_project{$args{-user}} = $pn;
+		     #$o->rpc('stop', $pn);
+		     my $list = create_list($root);
+		     $o->rpc('list', $list);
+		 }
+	     }
+	 } },
+       { name => 'stop',
+	 code => sub {
+	     my $o = shift;
+	     my(%args) = split("\0", shift);
+	     if (!auth_user($o, %args)) {
+		$o->rpc('ok', 'AUTH failed');
+	     } else {
+		 my $root = $user_project{$args{-user}};
+		 my $p = $root->current;
+		 if (!$p) {
+		     $o->rpc('ok', 'There is no current project running');
+		 } else {
+		     $p->end_time;
+		     $p->no_current;
+		     $current_project{$args{-user}} = '';
+		     my $list = create_list($root);
+		     $o->rpc('list', $list);
+		 }
+	     }
+	 } },
+       { name => 'list', code => sub {
+	     my $o = shift;
+	     my(%args) = split("\0", shift);
+	     if (!auth_user($o, %args)) {
+		 $o->rpc('ok', 'AUTH failed');
+	     } elsif (!exists $user_project{$args{-user}}) {
+		 $o->rpc('ok', 'No project file for ' . $args{-user});
+	     } else {
+		 my $root = $user_project{$args{-user}};
+		 my $list = create_list($root);
+		 $o->rpc('list', $list);
+	     }
+	 } },
+      ];
+
+    Event->tcplisten(desc => 'server',
+		     port => $Timex::Server::port,
+		     cb => sub {
+			 my($w, $sock) = @_;
+			 my $o = Event->tcpsession(desc => 'server',
+						   fd => $sock,
+						   api => $api);
+		     });
+    if (defined $top and Tk::Exists($top)) {
+	Event->timer(interval => 1,
+		     cb => sub {
+			 $top->update;
+		     });
+    }
+
+    Event::loop();
+}
+
+sub end_server {
+    if (defined $top and Tk::Exists($top)) {
+	$top->update;
+    }
+    foreach (Event::all_watchers()) {
+	$_->cancel;
+    }
+    end_all_projects();
+    Event::unloop_all(0);
+}
+
+sub auth_user {
+    my $o = shift;
+    my(%args) = @_;
+    my($name,$passwd);
+    return 1 if (exists $user_pw{$name} && $user_pw{$name} eq $passwd);
+    if ($^O eq "linux" && $] < 5.00557 &&
+	-r "/etc/shadow" && open(SHADOW, "/etc/shadow")) {
+	while(<SHADOW>) {
+	    my($n,$p) = split(":", $_);
+	    if ($n eq $args{-user}) {
+		($name,$passwd) = ($n, $p);
+		last;
+	    }
+	}
+	close SHADOW;
+    } else {
+	($name,$passwd) = getpwnam($args{-user});
+    }
+    crypt($args{-pw}, $passwd) eq $passwd;
+}
+
+sub create_list {
+    my $root = shift;
+#nstore($root);
+    join("\0\1", map {
+	join("\0", 
+	     $_->pathname,
+	     defined $_->current && $_->current eq $_,
+	     $_->sum_time(0, undef, -recursive => 1),
+	     $_->sum_time($today_time, undef, -recursive => 1),
+	     )
+    } sort $root->all_subprojects);
+}
+
+sub end_all_projects {
+    foreach (keys %user_project) {
+	if (defined $user_project{$_} and defined $user_project{$_}->current) {
+	    $user_project{$_}->current->end_time;
+	    $user_project{$_}->no_current;
+	    $current_project{$_} = '';
+	}
+    }
+}
+
+__END__
